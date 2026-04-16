@@ -23,7 +23,7 @@ jobs:
             -w /app/web \
             node:20-alpine \
             sh -c "
-              npm ci &&
+              npm install &&
               npm run build &&
               tar -czf ../app-arm64.tar.gz \
                 dist \
