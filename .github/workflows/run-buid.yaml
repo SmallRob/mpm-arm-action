@@ -21,7 +21,8 @@ jobs:
             --platform=linux/arm64 \
             -v ${{ github.workspace }}:/app \
             -w /app/web \
-            node:20-alpine bash -c "
+            node:20-alpine \
+            sh -c "
               npm ci &&
               npm run build &&
               tar -czf ../app-arm64.tar.gz \
