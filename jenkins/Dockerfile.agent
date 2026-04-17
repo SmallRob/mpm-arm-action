@@ -1,0 +1,132 @@
+# Jenkins Kubernetes Agent image for ASDM context-space analysis.
+# Build context must be the repository root so tools/codebuddy-log-parser is available.
+ARG NODE_BASE_IMAGE=node:20-bookworm
+FROM ${NODE_BASE_IMAGE}
+
+USER root
+
+RUN set -eux; \
+  [ -f /etc/apt/sources.list ] && sed -i \
+    -e 's|http://deb.debian.org/debian|https://mirrors.tuna.tsinghua.edu.cn/debian|g' \
+    -e 's|https://deb.debian.org/debian|https://mirrors.tuna.tsinghua.edu.cn/debian|g' \
+    -e 's|http://security.debian.org/debian-security|https://mirrors.tuna.tsinghua.edu.cn/debian-security|g' \
+    -e 's|https://security.debian.org/debian-security|https://mirrors.tuna.tsinghua.edu.cn/debian-security|g' \
+    /etc/apt/sources.list || true; \
+  find /etc/apt/sources.list.d -type f \( -name '*.list' -o -name '*.sources' \) -exec sed -i \
+    -e 's|http://deb.debian.org/debian|https://mirrors.tuna.tsinghua.edu.cn/debian|g' \
+    -e 's|https://deb.debian.org/debian|https://mirrors.tuna.tsinghua.edu.cn/debian|g' \
+    -e 's|http://security.debian.org/debian-security|https://mirrors.tuna.tsinghua.edu.cn/debian-security|g' \
+    -e 's|https://security.debian.org/debian-security|https://mirrors.tuna.tsinghua.edu.cn/debian-security|g' \
+    {} +; \
+  apt-get update; \
+  apt-get install -y --no-install-recommends \
+    bash \
+    ca-certificates \
+    curl \
+    git \
+    python3 \
+    vim-tiny \
+    jq \
+    wget \
+    unzip \
+    zip \
+    procps \
+    less \
+    file \
+    tree \
+    rsync \
+    openssh-client \
+    iproute2 \
+    openssl \
+    sudo \
+  ; \
+  rm -rf /var/lib/apt/lists/*
+
+# Hard-fix invalid shell options in profile scripts (e.g. `set -o Current`).
+# This prevents `/bin/sh` from failing before any Jenkins step command runs.
+RUN set -eux; \
+  for f in \
+    /etc/profile \
+    /etc/bash.bashrc \
+    /root/.profile \
+    /root/.bashrc \
+    /home/jenkins/.profile \
+    /home/jenkins/.bashrc \
+  ; do \
+    if [ -f "$f" ]; then \
+      sed -i '/^[[:space:]]*set[[:space:]]\+-o[[:space:]]\+Current[[:space:]]*$/d' "$f"; \
+    fi; \
+  done; \
+  if [ -d /etc/profile.d ]; then \
+    find /etc/profile.d -type f -name '*.sh' -print0 \
+      | xargs -0 -I{} sed -i '/^[[:space:]]*set[[:space:]]\+-o[[:space:]]\+Current[[:space:]]*$/d' "{}"; \
+  fi; \
+  ! grep -Rns --binary-files=without-match 'set[[:space:]]\+-o[[:space:]]\+Current' \
+      /etc/profile /etc/profile.d /root/.profile /root/.bashrc /home/jenkins/.profile /home/jenkins/.bashrc 2>/dev/null || true
+
+# Trust artifact domains certificate chains used by ASDM workspace install.
+RUN set -eux; \
+  hosts="platform-dt01.asdm.ai platform-sit01.asdm.ai"; \
+  for host in $hosts; do \
+    cert_dir="/usr/local/share/ca-certificates/${host}"; \
+    rm -rf "$cert_dir"; \
+    mkdir -p "$cert_dir"; \
+    echo | openssl s_client -showcerts -servername "$host" -connect "$host:443" 2>/dev/null \
+      | awk -v d="$cert_dir" ' \
+        /BEGIN CERTIFICATE/ {in_cert=1; c++; f=sprintf("%s/%02d.crt", d, c)} \
+        in_cert {print > f} \
+        /END CERTIFICATE/ {in_cert=0} \
+      '; \
+    test -f "$cert_dir/01.crt"; \
+  done; \
+  update-ca-certificates
+
+RUN set -eux; \
+  apt-get update; \
+  apt-get install -y --no-install-recommends default-jre-headless; \
+  java -version; \
+  rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g @tencent-ai/codebuddy-code \
+  && codebuddy --version \
+  && node --version \
+  && npm --version \
+  && git --version \
+  && python3 --version
+
+# build context: /Users/jason/Work/repository/asdm
+COPY tools/codebuddy-log-parser /opt/codebuddy-log-parser
+
+RUN cd /opt/codebuddy-log-parser \
+  && npm install \
+  && npm run build \
+  && npm prune --omit=dev
+
+ENV CODEBUDDY_LOG_PARSER=/opt/codebuddy-log-parser/dist/index.js
+
+WORKDIR /workspace
+
+# ── 安装 asdm CLI（通过本地打包产物安装，避免 build 时联网）──────────────────
+# 注意：Docker build context 需要提升到 /Users/jason/Work/repository/asdm
+# 以便 COPY 到 jenkins/leansoftx-asdm-bootstrapper-cli-*.tgz
+COPY jenkins/leansoftx-asdm-bootstrapper-cli-*.tgz /tmp/asdm-bootstrapper-cli.tgz
+
+RUN npm install -g /tmp/asdm-bootstrapper-cli.tgz \
+  && asdm --version \
+  && rm -f /tmp/asdm-bootstrapper-cli.tgz
+
+# ── 安装 web 前端依赖（ARM64 离线 node_modules） ──────────────────
+# node_modules 由 CI 流水线在 ARM 容器中预先生成并放置到 web/node_modules/
+COPY web/node_modules/ /opt/asdm-admin-web/node_modules/
+COPY web/package.json /opt/asdm-admin-web/package.json
+COPY web/package-lock.json /opt/asdm-admin-web/package-lock.json
+
+# ── 预热 npm 缓存（完全离线构建） ──────────────────
+# 将 node_modules 内容写入 npm cache，后续容器内 npm install --prefer-offline 可直接走缓存
+RUN set -eux; \
+  mkdir -p /opt/npm-cache; \
+  cd /opt/asdm-admin-web; \
+  npm install --cache /opt/npm-cache --prefer-offline --ignore-scripts || true; \
+  rm -rf /opt/asdm-admin-web/node_modules/.cache
+
+CMD ["sleep", "infinity"]

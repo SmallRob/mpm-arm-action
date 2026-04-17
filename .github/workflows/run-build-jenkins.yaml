@@ -1,0 +1,62 @@
+name: Build Jenkins Agent Docker Image (ARM64)
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'jenkins/Dockerfile.agent'
+      - 'web/package.json'
+      - 'tools/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install ARM64 web dependencies
+        run: |
+          docker run --rm \
+            --platform=linux/arm64 \
+            -v ${{ github.workspace }}:/app \
+            -w /app/web \
+            node:20-bookworm \
+            bash -c "
+              npm install --ignore-scripts &&
+              echo 'ARM64 node_modules ready'
+            "
+
+      - name: Verify build context
+        run: |
+          echo "=== Checking required files ==="
+          test -f jenkins/Dockerfile.agent     && echo "✓ Dockerfile.agent"
+          test -d web/node_modules             && echo "✓ web/node_modules"
+          test -f web/package.json             && echo "✓ web/package.json"
+          test -f web/package-lock.json        && echo "✓ web/package-lock.json"
+          test -d tools/codebuddy-log-parser   && echo "✓ tools/codebuddy-log-parser"
+          ls jenkins/leansoftx-asdm-bootstrapper-cli-*.tgz && echo "✓ asdm-bootstrapper-cli.tgz"
+
+      - name: Build Docker image (ARM64)
+        run: |
+          docker buildx build \
+            --platform linux/arm64 \
+            -f jenkins/Dockerfile.agent \
+            -t jenkins-agent-asdm:latest \
+            --output type=docker,dest=jenkins-agent-asdm-arm64.tar \
+            .
+
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jenkins-agent-asdm-arm64
+          path: jenkins-agent-asdm-arm64.tar
+          retention-days: 30

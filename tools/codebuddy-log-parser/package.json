@@ -1,0 +1,18 @@
+{
+  "name": "codebuddy-log-parser",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Parse CodeBuddy CLI --output-format stream-json (JSONL) to human-chat or JSON",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p .",
+    "clean": "rm -rf dist"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "~5.6.0"
+  }
+}
